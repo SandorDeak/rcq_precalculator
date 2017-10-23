@@ -1,6 +1,13 @@
 #include "sky_calculator.h"
+#include <fstream>
+#include <algorithm>
+#include <string.h>
+#include <gtx\transform.hpp>
 
-# define M_PI           3.14159265358979323846
+# define PI           3.14159265358979323846
+# define RED			680.e-9
+# define GREEN			550.e-9
+# define BLUE			440.e-9
 
 const double sky_calculator::Rayleigh_scale_height=8000.;
 const double sky_calculator::Mie_scale_height=1200.;
@@ -10,9 +17,11 @@ const double sky_calculator::Atmosphere_thickness=80000;
 const double sky_calculator::Atmosphere_radius=Earth_radius+sky_calculator::Atmosphere_thickness;
 
 
-sky_calculator::sky_calculator(size_t size)
+sky_calculator::sky_calculator(size_t size) : 
+	m_window(sf::VideoMode(size,size), "Debug info")
 {
-	m_image.resize(size);
+	m_image.create(size, size, sf::Color());
+	m_image_sprite.setTexture(m_texture, true);
 	m_intensity.resize(size);
 	m_accumulated_intensities.resize(size);
 	m_gathered_scattered_light.resize(size);
@@ -24,6 +33,45 @@ sky_calculator::~sky_calculator()
 {
 
 }
+
+void sky_calculator::set_params(double Rayleigh_particle_density, double Mie_particle_density, double assymetry_factor)
+{
+	m_assymetry_factor = assymetry_factor;
+
+	double const1 = 2.*PI*PI*pow(index_of_refraction*index_of_refraction - 1., 2.) / 3.;
+	double Rayleigh_particle_polarisability = const1 / pow(Rayleigh_particle_density, 2.);
+	double Mie_particle_polarisability = const1 / pow(Mie_particle_density, 2.);
+
+	m_Rayleigh_scattering_coefficient = {
+		4.*PI*Rayleigh_particle_polarisability*Rayleigh_particle_density / pow(RED, 4.),
+		4.*PI*Rayleigh_particle_polarisability*Rayleigh_particle_density / pow(GREEN, 4.),
+		4.*PI*Rayleigh_particle_polarisability*Rayleigh_particle_density / pow(BLUE, 4.)
+	};
+
+	m_Mie_scattering_coefficient = 4.*PI*Mie_particle_polarisability*Mie_particle_density;
+}
+
+void sky_calculator::load_Lebedev_params(const std::string_view& filename)
+{
+	std::ifstream file(filename.data());
+	char line[512];
+	while (file.getline(line, 512))
+	{
+		char* begin=line;
+		double theta = strtod(begin, &begin)*PI/180.;
+		double phi = strtod(begin, &begin)*PI/180.;
+		double w = strtod(begin, &begin)*PI/180.;
+
+		glm::dvec3 p = {
+			cos(theta)*sin(phi),
+			sin(theta)*sin(phi),
+			cos(phi)
+		};
+		m_Lebedev_coords.emplace_back(p, w);
+	}
+	file.close();
+}
+
 
 double sky_calculator::Rayleigh_phase(double cos_theta)
 {
@@ -109,7 +157,7 @@ glm::dvec3 sky_calculator::Rayleigh_single_scattering(const glm::dvec3& params)
 		res += area;
 		prev_val = current_value;
 	}
-	res *= (m_Rayleigh_scattering_coefficient / (4.*M_PI));
+	res *= (m_Rayleigh_scattering_coefficient / (4.*PI));
 
 	return res;
 }
@@ -151,7 +199,7 @@ double sky_calculator::Mie_single_scattering(const glm::dvec3& params)
 		res += area;
 		prev_val = current_value;
 	}
-	res *= (m_Mie_scattering_coefficient / (4.*M_PI));
+	res *= (m_Mie_scattering_coefficient / (4.*PI));
 
 	return res;
 }
@@ -162,7 +210,7 @@ double sky_calculator::atmosphere_intersection(const glm::dvec3 & P0, const glm:
 	return -v_dot_P0 + sqrt(v_dot_P0*v_dot_P0 - glm::dot(P0, P0) + Atmosphere_radius*Atmosphere_radius);
 }
 
-glm::dvec3 sky_calculator::map_indices(const glm::dvec3& indices)
+glm::dvec3 sky_calculator::indices_to_params(const glm::dvec3& indices)
 {
 	glm::dvec3 tex_coords =indices/(m_size-1.);
 
@@ -187,8 +235,224 @@ glm::dvec3 sky_calculator::map_indices(const glm::dvec3& indices)
 	return ret;
 }
 
+glm::dvec3 sky_calculator::params_to_indices(const glm::dvec3& params)
+{
+	glm::dvec3 indices;
+	indices.x = sqrt(params.x / Atmosphere_thickness);
+	
+	double cos_horizon= -sqrt(params.x*(2 * Earth_radius + params.x)) / (Earth_radius + params.x);
+	if (params.y > cos_horizon)
+	{
+		indices.y = 0.5*pow((params.y - cos_horizon) / (1. - cos_horizon), 0.2) + 0.5;
+	}
+	else
+	{
+		indices.y= 0.5*pow((cos_horizon - params.y) / (1. + cos_horizon), 0.2);
+	}
 
-void sky_calculator::do_first_iteration()
+	indices.z = 0.5*(atan(std::max(params.z, -0.1975)*tan(1.26*1.1)) / 1.1 + 0.74);
+
+	return indices*(m_size-1.);
+}
+
+
+glm::dvec3 sky_calculator::sample_intensity(const glm::dvec3& params)
+{
+	glm::dvec3 indices = params_to_indices(params);
+	uint32_t i = static_cast<uint32_t>(floor(indices.z));
+	uint32_t j = static_cast<uint32_t>(floor(indices.y));
+	uint32_t k = static_cast<uint32_t>(floor(indices.x));
+
+	double ai = indices.z - ceil(indices.z);
+	double aj = indices.y - ceil(indices.y);
+	double ak = indices.x - ceil(indices.x);
+	ai = 1. - ai;
+	aj = 1. - aj;
+	ak = 1. - ak;
+
+	uint32_t iplus = std::min(m_intensity.size()-1, i + 1);
+	uint32_t jplus = std::min(m_intensity.size()-1, j + 1);
+	uint32_t kplus = std::min(m_intensity.size()-1, k + 1);
+
+	return
+		ai*aj*ak*m_intensity[i][j][k] +
+		ai*aj*(1. - ak)*m_intensity[i][j][kplus] +
+		ai*(1. - aj)*ak*m_intensity[i][jplus][k] +
+		ai*(1. - aj)*(1. - ak)*m_intensity[i][jplus][kplus] +
+		(1. - ai)*aj*ak*m_intensity[i][j][k] +
+		(1. - ai)*aj*(1. - ak)*m_intensity[iplus][j][kplus] +
+		(1. - ai)*(1. - aj)*ak*m_intensity[iplus][jplus][k] +
+		(1. - ai)*(1. - aj)*(1. - ak)*m_intensity[iplus][jplus][kplus];
+}
+
+glm::dvec3 sky_calculator::sample_gathered_scattered(const glm::dvec3& params)
+{
+	glm::dvec3 indices = params_to_indices(params);
+	uint32_t i = static_cast<uint32_t>(floor(indices.z));
+	uint32_t j = static_cast<uint32_t>(floor(indices.y));
+	uint32_t k = static_cast<uint32_t>(floor(indices.x));
+
+	double ai = indices.z - ceil(indices.z);
+	double aj = indices.y - ceil(indices.y);
+	double ak = indices.x - ceil(indices.x);
+	ai = 1. - ai;
+	aj = 1. - aj;
+	ak = 1. - ak;
+
+	uint32_t iplus = std::min(m_gathered_scattered_light.size()-1, i + 1);
+	uint32_t jplus = std::min(m_gathered_scattered_light.size()-1, j + 1);
+	uint32_t kplus = std::min(m_gathered_scattered_light.size()-1, k + 1);
+
+	return
+		ai*aj*ak*m_gathered_scattered_light[i][j][k] +
+		ai*aj*(1. - ak)*m_gathered_scattered_light[i][j][kplus] +
+		ai*(1. - aj)*ak*m_gathered_scattered_light[i][jplus][k] +
+		ai*(1. - aj)*(1. - ak)*m_gathered_scattered_light[i][jplus][kplus] +
+		(1. - ai)*aj*ak*m_gathered_scattered_light[i][j][k] +
+		(1. - ai)*aj*(1. - ak)*m_gathered_scattered_light[iplus][j][kplus] +
+		(1. - ai)*(1. - aj)*ak*m_gathered_scattered_light[iplus][jplus][k] +
+		(1. - ai)*(1. - aj)*(1. - ak)*m_gathered_scattered_light[iplus][jplus][kplus];
+}
+
+
+
+glm::dvec3 sky_calculator::Rayleigh_gathered_scattered(const glm::dvec3& params)
+{
+	double height = params.x;
+	double  cos_view_zenit = params.y;
+	double cos_sun_zenit = params.z;
+
+	glm::dvec3 P(0., height + Earth_radius, 0.);
+	glm::dvec3 v(sqrt(1. - cos_view_zenit*cos_view_zenit), cos_view_zenit, 0.);
+	glm::dvec3 l(sqrt(1. - cos_sun_zenit*cos_sun_zenit), cos_sun_zenit, 0.);
+
+	glm::dvec3 sum(0.);
+	for (uint32_t i = 0; i < m_Lebedev_coords.size(); ++i)
+	{
+		glm::dvec3 omega = m_Lebedev_coords[i].first;
+		double w = m_Lebedev_coords[i].second;
+
+		sum += (w*Rayleigh_phase(glm::dot(v, omega))*
+			Rayleigh_phase(glm::dot(l, omega))*sample_intensity({params.x, omega.y, params.z}));
+	}
+
+	return sum;
+}
+
+glm::dvec3 sky_calculator::Mie_gathered_scattered(const glm::dvec3& params)
+{
+	double height = params.x;
+	double  cos_view_zenit = params.y;
+	double cos_sun_zenit = params.z;
+
+	glm::dvec3 P(0., height + Earth_radius, 0.);
+	glm::dvec3 v(sqrt(1. - cos_view_zenit*cos_view_zenit), cos_view_zenit, 0.);
+	glm::dvec3 l(sqrt(1. - cos_sun_zenit*cos_sun_zenit), cos_sun_zenit, 0.);
+
+	glm::dvec3 sum(0.);
+	for (uint32_t i = 0; i < m_Lebedev_coords.size(); ++i)
+	{
+		glm::dvec3 omega = m_Lebedev_coords[i].first;
+		double w = m_Lebedev_coords[i].second;
+
+		sum += (w*Mie_phase(glm::dot(v, omega), m_assymetry_factor)*
+			Mie_phase(glm::dot(l, omega), m_assymetry_factor)*sample_intensity({ params.x, omega.y, params.z }));
+	}
+	return sum;
+}
+
+glm::dvec3 sky_calculator::Rayleigh_multiple_scattering(const glm::dvec3& params)
+{
+	static const double sample_count = 100.;
+
+	double height = params.x;
+	double  cos_view_zenit = params.y;
+	double cos_sun_zenit = params.z;
+
+
+	glm::dvec3 P0(0., height + Earth_radius, 0.);
+	glm::dvec3 v(sqrt(1. - cos_view_zenit*cos_view_zenit), cos_view_zenit, 0.);
+	glm::dvec3 l(sqrt(1. - cos_sun_zenit*cos_sun_zenit), cos_sun_zenit, 0.);
+
+	double T = atmosphere_intersection(P0, v);
+
+	double dt = T / (sample_count - 1.);
+	glm::dvec3 step = dt*v;
+
+	glm::dvec3 P = P0;
+	glm::dvec3 prev_val = sample_gathered_scattered(params);
+
+	glm::dvec3 res(0.);
+
+	for (uint32_t i = 1; i < sample_count; ++i)
+	{
+		P += step;
+		double rot_angle=asin(glm::cross(P, P0).z/(glm::length(P)*glm::length(P0)));
+		glm::dmat3 rot = static_cast<glm::dmat3>(glm::rotate(rot_angle, glm::dvec3(0., 0, 1.)));
+		glm::dvec3 light = rot*l;
+		glm::dvec3 view = rot*v;
+
+		double view_zenit = view.y;
+		double sun_zenit = light.y;
+		double new_height = P.y - Earth_radius;
+		glm::dvec3 gathered_scattered = sample_gathered_scattered({ new_height, view_zenit, sun_zenit });
+		double f1 = -P.y / Rayleigh_scale_height;
+		glm::dvec3 f2 = -Rayleigh_transmittance(P0, P);
+		glm::dvec3 new_value = gathered_scattered*exp(f1 + f2);
+		glm::dvec3 area = dt*(prev_val + new_value) / 2.;
+		res += area;
+		prev_val = new_value;
+	}
+
+	return res*m_Rayleigh_scattering_coefficient/4.*PI;
+}
+glm::dvec3 sky_calculator::Mie_multiple_scattering(const glm::dvec3& params)
+{
+	static const double sample_count = 100.;
+
+	double height = params.x;
+	double  cos_view_zenit = params.y;
+	double cos_sun_zenit = params.z;
+
+
+	glm::dvec3 P0(0., height + Earth_radius, 0.);
+	glm::dvec3 v(sqrt(1. - cos_view_zenit*cos_view_zenit), cos_view_zenit, 0.);
+	glm::dvec3 l(sqrt(1. - cos_sun_zenit*cos_sun_zenit), cos_sun_zenit, 0.);
+
+	double T = atmosphere_intersection(P0, v);
+
+	double dt = T / (sample_count - 1.);
+	glm::dvec3 step = dt*v;
+
+	glm::dvec3 P = P0;
+	glm::dvec3 prev_val = sample_gathered_scattered(params);
+
+	glm::dvec3 res(0.);
+
+	for (uint32_t i = 1; i < sample_count; ++i)
+	{
+		P += step;
+		double rot_angle = asin(glm::cross(P, P0).z / (glm::length(P)*glm::length(P0)));
+		glm::dmat3 rot = static_cast<glm::dmat3>(glm::rotate(rot_angle, glm::dvec3(0., 0, 1.)));
+		glm::dvec3 light = rot*l;
+		glm::dvec3 view = rot*v;
+
+		double view_zenit = view.y;
+double sun_zenit = light.y;
+double new_height = P.y - Earth_radius;
+glm::dvec3 gathered_scattered = sample_gathered_scattered({ new_height, view_zenit, sun_zenit });
+double f1 = -P.y / Mie_scale_height;
+glm::dvec3 f2(-Mie_transmittance(P0, P));
+glm::dvec3 new_value = gathered_scattered*exp(f1 + f2);
+glm::dvec3 area = dt*(prev_val + new_value) / 2.;
+res += area;
+prev_val = new_value;
+	}
+
+	return res*m_Mie_scattering_coefficient / 4.*PI;
+}
+
+void sky_calculator::calc_single_scattering()
 {
 	//fill intensitiy
 	uint32_t size = static_cast<uint32_t>(m_size);
@@ -199,14 +463,119 @@ void sky_calculator::do_first_iteration()
 			for (uint32_t k = 0; k < size; ++k)
 			{
 				glm::dvec3 indices = { static_cast<double>(k), static_cast<double>(j), static_cast<double>(i) };
-				glm::dvec3 params = map_indices(indices);
+				glm::dvec3 params = indices_to_params(indices);
 				glm::dvec3 Rayleigh = Rayleigh_single_scattering(params);
 				glm::dvec3 Mie(Mie_single_scattering(params));
 				m_intensity[i][j][k] = Mie + Rayleigh;
+				m_accumulated_intensities[i][j][k] = Mie + Rayleigh;
 			}
 		}
 
+		show(m_intensity, i);
+
+	}
+}
+
+void sky_calculator::iterate()
+{
+	//compute gathered scattered light
+	uint32_t size = static_cast<uint32_t>(m_size);
+	for (uint32_t i = 0; i < size; ++i)
+	{
+		for (uint32_t j = 0; j < size; ++j)
+		{
+			for (uint32_t k = 0; k < size; ++k)
+			{
+				glm::dvec3 indices = { static_cast<double>(k), static_cast<double>(j), static_cast<double>(i) };
+				glm::dvec3 params = indices_to_params(indices);
+				glm::dvec3 Rayleigh = Rayleigh_gathered_scattered(params);
+				glm::dvec3 Mie(Mie_gathered_scattered(params));
+				m_gathered_scattered_light[i][j][k] = Rayleigh + Mie;
+			}
+		}
 	}
 
-	//fill gathered scattered light
+	// calculate new inensities
+	for (uint32_t i = 0; i < size; ++i)
+	{
+		for (uint32_t j = 0; j < size; ++j)
+		{
+			for (uint32_t k = 0; k < size; ++k)
+			{
+				glm::dvec3 indices = { static_cast<double>(k), static_cast<double>(j), static_cast<double>(i) };
+				glm::dvec3 params = indices_to_params(indices);
+				glm::dvec3 Rayleigh = Rayleigh_multiple_scattering(params);
+				glm::dvec3 Mie = Mie_multiple_scattering(params);
+				m_intensity[i][j][k] = Rayleigh + Mie;
+			}
+		}
+	}
+
+	//accumulate intensity
+	for (uint32_t i = 0; i < size; ++i)
+	{
+		for (uint32_t j = 0; j < size; ++j)
+		{
+			for (uint32_t k = 0; k < size; ++k)
+			{
+				m_accumulated_intensities[i][j][k] += m_intensity[i][j][k];
+			}
+		}
+	}
+}
+
+void sky_calculator::compute(uint32_t scattering_count)
+{
+	calc_single_scattering();
+
+	show(m_intensity, 0);
+
+	for (uint32_t i = 0; i < scattering_count - 1; ++i)
+	{
+		iterate();
+	}
+}
+
+void sky_calculator::write_to_file(const std::string_view& filename)
+{
+	std::ofstream file(filename.data());
+	uint32_t size = static_cast<uint32_t>(m_size);
+
+	for (uint32_t i = 0; i < size; ++i)
+	{
+		for (uint32_t j = 0; j < size; ++j)
+		{
+			for (uint32_t k = 0; k < size; ++k)
+			{
+				auto& p = m_accumulated_intensities[i][j][k];
+				file << p.x << p.y << p.z;
+			}
+		}
+	}
+	std::flush(file);
+	file.close();
+}
+
+void sky_calculator::show(const image3d& pic, size_t index)
+{
+	sf::Event e;
+	while (m_window.pollEvent(e));
+
+	m_window.clear(sf::Color(100,100,100));
+	
+	sf::RectangleShape r(sf::Vector2f(1,1));
+
+	for (uint32_t i = 0; i < pic[index].size(); ++i)
+	{
+		for (uint32_t j = 0; j < pic[index][i].size(); ++j)
+		{
+			const auto& p = pic[index][i][j];
+			r.setPosition(j, i);
+			r.setFillColor(sf::Color(255.*p.x, 255.*p.y, 255. * p.z, 255));
+			m_window.draw(r);
+			auto& vmi = m_image.getPixel(j, i);
+			int g = 4 + 9;
+		}
+	}
+	m_window.display();
 }
