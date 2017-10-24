@@ -105,20 +105,72 @@ double sky_calculator::Mie_scattering_intensity(double cos_theta, double height)
 	return Mie_density(height)*Mie_phase(cos_theta, m_assymetry_factor)*m_Mie_scattering_coefficient;
 }
 
-glm::dvec3 sky_calculator::Rayleigh_transmittance(const glm::dvec3& start, const glm::dvec3& end)
+glm::dvec3 sky_calculator::Rayleigh_transmittance(const glm::dvec3& P0, const glm::dvec3& P1)
 {
-	double a = start.y - Earth_radius;
-	double b = end.y - Earth_radius;
-	return ((exp(a / Rayleigh_scale_height) - exp(b / Rayleigh_scale_height))*Rayleigh_scale_height / (b - a))*
-		m_Rayleigh_scattering_coefficient;
+	constexpr double sample_count = 100.;
+	constexpr double dt = 1. / (sample_count - 1.);
+	glm::dvec3 v = P1 - P0;
+	glm::dvec3 P = P0;
+	glm::dvec3 step = dt*v;
+	double sum = 0.;
+	double prev_val = exp((Earth_radius-glm::length(P))/Rayleigh_scale_height);
+
+	for (uint32_t i = 1; i < sample_count; ++i)
+	{
+		P += step;
+		double curr_val = exp((Earth_radius - glm::length(P)) / Rayleigh_scale_height);
+		double area = dt*(prev_val + curr_val) / 2.;
+		sum += area;
+		prev_val = curr_val;
+	}
+
+	return sum*glm::length(v)*m_Rayleigh_scattering_coefficient;
 }
 
-double sky_calculator::Mie_transmittance(const glm::dvec3& start, const glm::dvec3& end)
+double sky_calculator::Mie_transmittance(const glm::dvec3& P0, const glm::dvec3& P1)
 {
-	double a = start.y - Earth_radius;
-	double b = end.y - Earth_radius;
-	return ((exp(a / Mie_scale_height) - exp(b / Mie_scale_height))*Mie_scale_height / (b - a))*
-		m_Mie_scattering_coefficient;
+	constexpr double sample_count = 100.;
+	constexpr double dt = 1. / (sample_count - 1.);
+	glm::dvec3 v = P1 - P0;
+	glm::dvec3 P = P0;
+	glm::dvec3 step = dt*v;
+	double sum = 0.;
+	double prev_val = exp((Earth_radius - glm::length(P)) / Mie_scale_height);
+
+	for (uint32_t i = 1; i < sample_count; ++i)
+	{
+		P += step;
+		double curr_val = exp((Earth_radius - glm::length(P)) / Mie_scale_height);
+		double area = dt*(prev_val + curr_val) / 2.;
+		sum += area;
+		prev_val = curr_val;
+	}
+
+	return sum*glm::length(v)*m_Mie_scattering_coefficient;
+}
+
+std::pair<double, double> sky_calculator::calc_integration_interval(const glm::dvec3 & P0, const glm::dvec3 & v)
+{
+	auto T_Atmo = atmosphere_intersection(P0, v);
+	double T_start, T_end;
+
+	if (!T_Atmo)
+		return { 0., 0. };
+	if (T_Atmo.value().second <= 0.f)
+		return { 0., 0. };
+
+	T_start = std::max(0., T_Atmo.value().first);
+	T_end = T_Atmo.value().second;
+
+	auto T_Earth = Earth_intersection(P0, v);
+	if (T_Earth)
+	{
+		if (T_Earth.value().first <= 0. && T_Earth.value().second > 0.) //inside Earth
+			return { 0., 0. };
+		if (T_Earth.value().first > 0.)
+			T_end = std::min(T_end, T_Earth.value().first);
+	}
+	return { T_start, T_end };
 }
 
 glm::dvec3 sky_calculator::Rayleigh_single_scattering(const glm::dvec3& params)
@@ -133,24 +185,34 @@ glm::dvec3 sky_calculator::Rayleigh_single_scattering(const glm::dvec3& params)
 	glm::dvec3 v(sqrt(1.-cos_view_zenit*cos_view_zenit), cos_view_zenit, 0.);
 	glm::dvec3 l(sqrt(1. - cos_sun_zenit*cos_sun_zenit), cos_sun_zenit, 0.);
 
-	double T = atmosphere_intersection(P0, v);
+	auto[T_start, T_end] = calc_integration_interval(P0, v);
+	if (T_start == T_end)
+		return glm::dvec3(0.);
 
-	double dt = T / (sample_count - 1.);
+
+	double dt = (T_end-T_start) / (sample_count - 1.);
 	glm::dvec3 step = dt*v;
-
+	P0 = P0 + T_start*step;
 	glm::dvec3 P = P0;
-	double S = atmosphere_intersection(P, l);
-	glm::dvec3 prev_val = exp(-Rayleigh_transmittance(P, P + S*l));
+
+	glm::dvec3 prev_val;	
+	if (auto[S_start, S_end] = calc_integration_interval(P, l); S_start == S_end)
+		prev_val = glm::dvec3(0.f);
+	else
+		prev_val = exp(-Rayleigh_transmittance(P+S_start*l, P + S_end*l));
 
 	glm::vec3 res(0.);
 
 	for (uint32_t i = 1; i < sample_count; ++i)
 	{
 		P += step;
-		glm::dvec3 f1(-(P.y - Earth_radius) / Rayleigh_scale_height);
+		glm::dvec3 f1(-(glm::length(P) - Earth_radius) / Rayleigh_scale_height);
 		glm::dvec3 f2 = -Rayleigh_transmittance(P0, P);
-		S = atmosphere_intersection(P, l);
-		glm::dvec3 f3 = -Rayleigh_transmittance(P, P + S*l);
+		glm::dvec3 f3;
+		if (auto[S_start, S_end] = calc_integration_interval(P, l); S_start == S_end)
+			f3 = glm::dvec3(0.f);
+		else
+			f3 = -Rayleigh_transmittance(P + S_start*l, P + S_end*l);
 		glm::dvec3 current_value = exp(f1 + f2 + f3);
 
 		glm::dvec3 area = dt*(current_value + prev_val) / 2.;
@@ -170,29 +232,38 @@ double sky_calculator::Mie_single_scattering(const glm::dvec3& params)
 	double  cos_view_zenit = params.y;
 	double cos_sun_zenit = params.z;
 
-
 	glm::dvec3 P0(0., height + Earth_radius, 0.);
-	glm::dvec3 v(sqrt(1.-cos_view_zenit*cos_view_zenit), cos_view_zenit, 0.);
-	glm::dvec3 l(sqrt(1.-cos_sun_zenit*cos_sun_zenit), cos_sun_zenit, 0.);
+	glm::dvec3 v(sqrt(1. - cos_view_zenit*cos_view_zenit), cos_view_zenit, 0.);
+	glm::dvec3 l(sqrt(1. - cos_sun_zenit*cos_sun_zenit), cos_sun_zenit, 0.);
 
-	double T = atmosphere_intersection(P0, v);
+	auto[T_start, T_end] = calc_integration_interval(P0, v);
+	if (T_start == T_end)
+		return 0.;
 
-	double dt = T / (sample_count - 1.);
+
+	double dt = (T_end - T_start) / (sample_count - 1.);
 	glm::dvec3 step = dt*v;
-
+	P0 = P0 + T_start*step;
 	glm::dvec3 P = P0;
-	double S = atmosphere_intersection(P, l);
-	double prev_val = exp(-Mie_transmittance(P, P + S*l));
+
+	double prev_val;
+	if (auto[S_start, S_end] = calc_integration_interval(P, l); S_start == S_end)
+		prev_val = 0.;
+	else
+		prev_val = exp(-Mie_transmittance(P + S_start*l, P + S_end*l));
 
 	double res(0.);
 
 	for (uint32_t i = 1; i < sample_count; ++i)
 	{
 		P += step;
-		double f1=-(P.y - Earth_radius) / Mie_scale_height;
+		double f1=-(glm::length(P) - Earth_radius) / Mie_scale_height;
 		double f2 = -Mie_transmittance(P0, P);
-		S = atmosphere_intersection(P, l);
-		double f3 = -Mie_transmittance(P, P + S*l);
+		double f3;
+		if (auto[S_start, S_end] = calc_integration_interval(P, l); S_start == S_end)
+			f3 = 0.;
+		else
+			f3 = -Mie_transmittance(P + S_start*l, P + S_end*l);
 		double current_value = exp(f1 + f2 + f3);
 
 		double area = dt*(current_value + prev_val) / 2.;
@@ -204,10 +275,34 @@ double sky_calculator::Mie_single_scattering(const glm::dvec3& params)
 	return res;
 }
 
-double sky_calculator::atmosphere_intersection(const glm::dvec3 & P0, const glm::dvec3 & v)
+std::optional<std::pair<double, double>> sky_calculator::atmosphere_intersection(const glm::dvec3 & P0, const glm::dvec3 & v)
 {
+	std::optional<std::pair<double, double>> ret;
+
 	double v_dot_P0 = glm::dot(P0, v);
-	return -v_dot_P0 + sqrt(v_dot_P0*v_dot_P0 - glm::dot(P0, P0) + Atmosphere_radius*Atmosphere_radius);
+	if (double d = v_dot_P0*v_dot_P0 - glm::dot(P0, P0) + Atmosphere_radius*Atmosphere_radius; d > 0.)
+	{
+		double sqrt_d = sqrt(d);
+		double t1 = -v_dot_P0 - sqrt_d;
+		double t2 = -v_dot_P0 + sqrt_d;
+		ret.emplace(t1, t2);
+	}
+	return ret;
+}
+
+std::optional<std::pair<double, double>> sky_calculator::Earth_intersection(const glm::dvec3 & P0, const glm::dvec3 & v)
+{
+	std::optional<std::pair<double, double>> ret;
+
+	double v_dot_P0 = glm::dot(P0, v);
+	if (double d = v_dot_P0*v_dot_P0 - glm::dot(P0, P0) + Earth_radius*Earth_radius; d > 0.)
+	{
+		double sqrt_d = sqrt(d);
+		double t1 = -v_dot_P0 - sqrt_d;
+		double t2 = -v_dot_P0 + sqrt_d;
+		ret.emplace(t1, t2);
+	}
+	return ret;
 }
 
 glm::dvec3 sky_calculator::indices_to_params(const glm::dvec3& indices)
@@ -363,7 +458,7 @@ glm::dvec3 sky_calculator::Mie_gathered_scattered(const glm::dvec3& params)
 
 glm::dvec3 sky_calculator::Rayleigh_multiple_scattering(const glm::dvec3& params)
 {
-	static const double sample_count = 100.;
+	/*static const double sample_count = 100.;
 
 	double height = params.x;
 	double  cos_view_zenit = params.y;
@@ -404,11 +499,12 @@ glm::dvec3 sky_calculator::Rayleigh_multiple_scattering(const glm::dvec3& params
 		prev_val = new_value;
 	}
 
-	return res*m_Rayleigh_scattering_coefficient/4.*PI;
+	return res*m_Rayleigh_scattering_coefficient/4.*PI;*/
+	return glm::dvec3();
 }
 glm::dvec3 sky_calculator::Mie_multiple_scattering(const glm::dvec3& params)
 {
-	static const double sample_count = 100.;
+	/*static const double sample_count = 100.;
 
 	double height = params.x;
 	double  cos_view_zenit = params.y;
@@ -449,12 +545,12 @@ res += area;
 prev_val = new_value;
 	}
 
-	return res*m_Mie_scattering_coefficient / 4.*PI;
+	return res*m_Mie_scattering_coefficient / 4.*PI;*/
+	return glm::dvec3();
 }
 
 void sky_calculator::calc_single_scattering()
 {
-	//fill intensitiy
 	uint32_t size = static_cast<uint32_t>(m_size);
 	for (uint32_t i = 0; i < size; ++i)
 	{
@@ -538,7 +634,7 @@ void sky_calculator::compute(uint32_t scattering_count)
 
 void sky_calculator::write_to_file(const std::string_view& filename)
 {
-	std::ofstream file(filename.data());
+	std::ofstream file(filename.data(), std::ios::binary);
 	uint32_t size = static_cast<uint32_t>(m_size);
 
 	for (uint32_t i = 0; i < size; ++i)
@@ -548,7 +644,8 @@ void sky_calculator::write_to_file(const std::string_view& filename)
 			for (uint32_t k = 0; k < size; ++k)
 			{
 				auto& p = m_accumulated_intensities[i][j][k];
-				file << p.x << p.y << p.z;
+				glm::vec4 q = { static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z), 1.f };
+				file.write(reinterpret_cast<char*>(&q), sizeof(glm::vec4));
 			}
 		}
 	}
@@ -575,6 +672,38 @@ void sky_calculator::show(const image3d& pic, size_t index)
 			m_window.draw(r);
 			auto& vmi = m_image.getPixel(j, i);
 			int g = 4 + 9;
+		}
+	}
+	m_window.display();
+}
+
+void sky_calculator::load_from_file(const std::string_view & filename, size_t size1)
+{
+	std::ifstream file(filename.data(), std::ios::ate | std::ios::binary);
+
+	if (!file.is_open())
+		throw std::runtime_error("failed to open file: " + std::string(filename));
+
+	size_t size = (size_t)file.tellg();
+	std::vector<glm::vec4> data(size/sizeof(glm::vec4));
+	file.seekg(0);
+	file.read(reinterpret_cast<char*>(data.data()), size);
+	file.close();
+	uint32_t count = 0;
+
+	m_window.clear(sf::Color(100, 100, 100));
+
+	sf::RectangleShape r(sf::Vector2f(1, 1));
+	for (uint32_t i = 0; i < size1; ++i)
+	{
+		for (uint32_t j = 0; j < size1; ++j)
+		{;
+			r.setPosition(j, i);
+			auto& p = data[count];
+			r.setFillColor(sf::Color(255.*p.x, 255.*p.y, 255. * p.z, 255));
+			m_window.draw(r);
+			auto& vmi = m_image.getPixel(j, i);
+			++count;
 		}
 	}
 	m_window.display();

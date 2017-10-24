@@ -4,6 +4,7 @@
 #include <string_view>
 #include <glm.hpp>
 #include <SFML/Graphics.hpp>
+#include <optional>
 
 class image3d
 {
@@ -45,6 +46,7 @@ public:
 	void load_Lebedev_params(const std::string_view& filename);
 	void compute(uint32_t scattering_count);
 	void write_to_file(const std::string_view& filename);
+	void load_from_file(const std::string_view& filename, size_t size);
 
 private:
 	static const double Rayleigh_scale_height;
@@ -58,13 +60,15 @@ private:
 	static double Mie_phase(double theta, double g);
 	static double Rayleigh_density(double height);
 	static double Mie_density(double height);
-	static double atmosphere_intersection(const glm::dvec3& P0, const glm::dvec3& v);
+	static std::optional<std::pair<double, double>> atmosphere_intersection(const glm::dvec3& P0, const glm::dvec3& v);
+	static std::optional<std::pair<double, double>> Earth_intersection(const glm::dvec3& P0, const glm::dvec3& v);
+	std::pair<double, double> calc_integration_interval(const glm::dvec3& P0, const glm::dvec3& v);
 	
 	glm::dvec3 Rayleigh_scattering_intensity(double cos_theta, double height);
 	double Mie_scattering_intensity(double cos_theta, double height);
 
-	glm::dvec3 Rayleigh_transmittance(const glm::dvec3& start, const glm::dvec3& end);
-	double Mie_transmittance(const glm::dvec3& start, const glm::dvec3& end);
+	glm::dvec3 Rayleigh_transmittance(const glm::dvec3& P0, const glm::dvec3& v);
+	double Mie_transmittance(const glm::dvec3& P0, const glm::dvec3& v);
 
 	glm::dvec3 Rayleigh_single_scattering(const glm::dvec3& params);
 	double Mie_single_scattering(const glm::dvec3& params);
