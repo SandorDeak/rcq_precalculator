@@ -17,13 +17,16 @@ const double sky_calculator::Atmosphere_thickness=80000;
 const double sky_calculator::Atmosphere_radius=Earth_radius+sky_calculator::Atmosphere_thickness;
 
 
-sky_calculator::sky_calculator(size_t size) : 
-	m_window(sf::VideoMode(size,size), "Debug info")
+sky_calculator::sky_calculator(size_t size, size_t transmittance_size) :
+	m_window(sf::VideoMode(size,size), "Debug info"),
+	m_window_transmittance(sf::VideoMode(transmittance_size, transmittance_size), "Transmittance")
 {
 	m_intensity.resize(size);
 	m_accumulated_intensity.resize(size);
 	m_gathered_scattered_light_Rayleigh.resize(size);
 	m_gathered_scattered_light_Mie.resize(size);
+	m_ray_length.resize(size);
+	m_transmittance.resize(transmittance_size);
 	m_size = static_cast<double>(size);
 }
 
@@ -51,11 +54,14 @@ void sky_calculator::set_params(double Rayleigh_particle_density, double Mie_par
 }
 
 void sky_calculator::set_params_directly(const glm::dvec3 & Rayleigh_scattering_coefficient, double Mie_scattering_coefficient, 
-	double assymetry_factor)
+	double assymetry_factor, const glm::dvec3& ozone_absorbtion_coefficient)
 {
 	m_assymetry_factor = assymetry_factor;
 	m_Rayleigh_scattering_coefficient = Rayleigh_scattering_coefficient;
+	m_Rayleigh_extinction_coefficient = Rayleigh_scattering_coefficient;
 	m_Mie_scattering_coefficient = Mie_scattering_coefficient;
+	m_Mie_extinction_coefficient = Mie_scattering_coefficient*1.11;
+	m_ozone_extinction_coefficient = ozone_absorbtion_coefficient;
 }
 
 void sky_calculator::load_Lebedev_params(const std::string_view& filename)
@@ -82,14 +88,18 @@ void sky_calculator::load_Lebedev_params(const std::string_view& filename)
 
 double sky_calculator::Rayleigh_phase(double cos_theta)
 {
-	return (3.*(1. + cos_theta*cos_theta)) / 4.;
+	return (3.*(1. + cos_theta*cos_theta)) / (16.*PI);
 }
 
-double sky_calculator::Mie_phase(double cos_theta, double g)
+double sky_calculator::Mie_phase(double cos_theta, double g) //HG
 {
-	double g_square = g*g;
+	/*double g_square = g*g;
 	double nom = 3. * (1. - g_square)*(1. + cos_theta*cos_theta);
 	double denom = 2. * (2. + g_square)*pow(1. + g_square - 2. * g*cos_theta, 1.5);
+	return nom / denom;*/
+	double g_square = g*g;
+	double nom = 1. - g_square;
+	double denom = 4.*PI*pow(1. + g_square - 2. * g*cos_theta, 1.5);
 	return nom / denom;
 }
 
@@ -160,7 +170,8 @@ glm::dvec3 sky_calculator::transmittance(const glm::dvec3 & P0, const glm::dvec3
 		prev_val_Mie = curr_val_Mie;
 	}
 
-	return sum_Rayleigh*glm::length(v)*m_Rayleigh_scattering_coefficient+sum_Mie*glm::dvec3(m_Mie_scattering_coefficient);
+	return (sum_Rayleigh*(m_Rayleigh_extinction_coefficient+m_ozone_extinction_coefficient)
+		+sum_Mie*glm::dvec3(m_Mie_scattering_coefficient))*glm::length(v);
 }
 
 /*double sky_calculator::Mie_transmittance(const glm::dvec3& P0, const glm::dvec3& P1)
@@ -233,7 +244,7 @@ std::pair<double, double> sky_calculator::calc_integration_interval_for_light(co
 	return { T_start, T_end };
 }
 
-glm::dvec3 sky_calculator::Rayleigh_single_scattering(const glm::dvec3& params)
+std::pair<glm::dvec3, float> sky_calculator::Rayleigh_single_scattering(const glm::dvec3& params)
 {
 	static const double sample_count = 100.;
 
@@ -247,7 +258,7 @@ glm::dvec3 sky_calculator::Rayleigh_single_scattering(const glm::dvec3& params)
 
 	auto[T_start, T_end] = calc_integration_interval(P0, v);
 	if (T_start == T_end)
-		return glm::dvec3(0.);
+		return { glm::dvec3(0.), std::numeric_limits<float>::epsilon() };
 
 
 	double dt = (T_end-T_start) / (sample_count - 1.);
@@ -281,7 +292,7 @@ glm::dvec3 sky_calculator::Rayleigh_single_scattering(const glm::dvec3& params)
 	}
 	res *= (m_Rayleigh_scattering_coefficient / (4.*PI));
 
-	return res;
+	return { res, T_end - T_start };
 }
 
 glm::dvec3 sky_calculator::Mie_single_scattering(const glm::dvec3& params)
@@ -362,6 +373,26 @@ std::optional<std::pair<double, double>> sky_calculator::Earth_intersection(cons
 		double t2 = -v_dot_P0 + sqrt_d;
 		ret.emplace(t1, t2);
 	}
+	return ret;
+}
+
+glm::dvec2 sky_calculator::tex_coords_to_params(const glm::dvec2 & tex_coords)
+{
+	glm::dvec2 ret;
+	ret.x = Atmosphere_thickness*tex_coords.x*tex_coords.x;
+
+	double cos_horizon = -sqrt(ret.x*(2 * Earth_radius + ret.x)) / (Earth_radius + ret.x);
+
+	if (tex_coords.y > 0.5)
+	{
+		ret.y = pow(2.*tex_coords.y - 1., 5.)*(1.f - cos_horizon) + cos_horizon;
+	}
+	else
+	{
+		ret.y = -pow(2.*tex_coords.y, 5.)*(1.f + cos_horizon) + cos_horizon;
+	}
+	ret.y = glm::clamp(ret.y, -1., 1.);
+
 	return ret;
 }
 
@@ -606,9 +637,10 @@ void sky_calculator::calc_single_Rayleigh_scattering()
 			{
 				glm::dvec3 indices = { static_cast<double>(k), static_cast<double>(j), static_cast<double>(i) };
 				glm::dvec3 params = indices_to_params(indices);
-				glm::dvec3 Rayleigh = Rayleigh_single_scattering(params);
+				auto [Rayleigh, ray_length] = Rayleigh_single_scattering(params);
 				assert(!isnan(Rayleigh.x) && !isnan(Rayleigh.y) && !isnan(Rayleigh.z));
 				m_intensity[i][j][k] = Rayleigh;
+				m_ray_length[i][j][k] = ray_length;
 				m_accumulated_intensity[i][j][k] = Rayleigh;
 			}
 		}
@@ -685,21 +717,28 @@ void sky_calculator::iterate()
 
 void sky_calculator::compute(uint32_t scattering_count, const std::string_view& filename)
 {
-	calc_single_Rayleigh_scattering();
-	show(m_intensity, 0);
-	for (uint32_t i = 0; i < scattering_count - 1; ++i)
+	if (scattering_count != 0)
 	{
-		iterate();
-	}
-	write_to_file(std::string(filename) + "_Rayleigh.sky");
+		calc_single_Rayleigh_scattering();
+		show(m_intensity, 0);
+		for (uint32_t i = 0; i < scattering_count - 1; ++i)
+		{
+			iterate();
+		}
+		write_to_file(std::string(filename) + "_Rayleigh.sky");
 
-	calc_single_Mie_scattering();
-	show(m_intensity, 0);
-	for (uint32_t i = 0; i < scattering_count - 1; ++i)
-	{
-		iterate();
+		calc_single_Mie_scattering();
+		show(m_intensity, 0);
+		for (uint32_t i = 0; i < scattering_count - 1; ++i)
+		{
+			iterate();
+		}
+		write_to_file(std::string(filename) + "_Mie.sky");
 	}
-	write_to_file(std::string(filename) + "_Mie.sky");	
+
+	calc_transmittance();
+	show_transmittance();
+	write_transmittance_to_file(std::string(filename) + "_transmittance.sky");
 }
 
 void sky_calculator::write_to_file(const std::string_view& filename)
@@ -714,9 +753,28 @@ void sky_calculator::write_to_file(const std::string_view& filename)
 			for (uint32_t k = 0; k < size; ++k)
 			{
 				auto& p = m_accumulated_intensity[i][j][k];
-				glm::vec4 q = { static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z), 1.f };
+				glm::vec4 q = { static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z), m_ray_length[i][j][k] };
 				file.write(reinterpret_cast<char*>(&q), sizeof(glm::vec4));
 			}
+		}
+	}
+	std::flush(file);
+	file.close();
+}
+
+void sky_calculator::write_transmittance_to_file(const std::string_view & filename)
+{
+	std::ofstream file(filename.data(), std::ios::binary);
+	uint32_t size = m_transmittance.size();
+
+	for (uint32_t i = 0; i < size; ++i)
+	{
+		for (uint32_t j = 0; j < size; ++j)
+		{
+
+			auto& p = m_transmittance[i][j];
+			glm::vec4 q = { static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z), 1.f };
+			file.write(reinterpret_cast<char*>(&q), sizeof(glm::vec4));
 		}
 	}
 	std::flush(file);
@@ -743,6 +801,28 @@ void sky_calculator::show(const image3d& pic, size_t index)
 		}
 	}
 	m_window.display();
+}
+
+void sky_calculator::show_transmittance()
+{
+	sf::Event e;
+	while (m_window_transmittance.pollEvent(e));
+
+	m_window.clear(sf::Color(100, 100, 100));
+
+	sf::RectangleShape r(sf::Vector2f(1, 1));
+
+	for (uint32_t i = 0; i < m_transmittance.size(); ++i)
+	{
+		for (uint32_t j = 0; j < m_transmittance[i].size(); ++j)
+		{
+			const auto& p = m_transmittance[i][j];
+			r.setPosition(j, i);
+			r.setFillColor(sf::Color(255.*p.x, 255.*p.y, 255. * p.z, 255));
+			m_window_transmittance.draw(r);
+		}
+	}
+	m_window_transmittance.display();
 }
 
 void sky_calculator::load_from_file(const std::string_view & filename, size_t size1)
@@ -774,4 +854,22 @@ void sky_calculator::load_from_file(const std::string_view & filename, size_t si
 		}
 	}
 	m_window.display();
+}
+
+void sky_calculator::calc_transmittance()
+{
+	double size = static_cast<double>(m_transmittance.size())-1.;
+
+	for (uint32_t i = 0; i < m_transmittance.size(); ++i)
+	{
+		for (uint32_t j = 0; j < m_transmittance[i].size(); ++j)
+		{
+			glm::dvec2 tex_coords = { static_cast<double>(j)/size, static_cast<double>(i)/size };
+			glm::dvec2 params = tex_coords_to_params(tex_coords);
+			glm::dvec3 P0(0., Earth_radius + params.x, 0.);
+			glm::dvec3 v(sqrt(1. - params.y*params.y), params.y, 0.);
+			auto[T_start, T_end] = calc_integration_interval(P0, v);
+			m_transmittance[i][j] = exp(-transmittance(P0 + T_start*v, P0 + T_end*v));
+		}
+	}
 }
