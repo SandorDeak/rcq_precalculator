@@ -21,9 +21,15 @@
     <ClCompile Include="sky_calculator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="terrain_generator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="sky_calculator.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="terrain_generator.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
