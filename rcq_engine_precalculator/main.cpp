@@ -1,4 +1,12 @@
 #include "sky_calculator.h"
+#include "terrain_generator.h"
+#include "terrgen.h"
+#include <random>
+#include <iostream>
+
+#define TERRAIN
+
+#ifdef SKY
 
 int main()
 {
@@ -12,3 +20,22 @@ int main()
 	sky.compute(0, "output/try");
   	return 0;
 }
+
+#endif //SKY
+
+#ifdef  TERRAIN
+
+int main()
+{
+	/*terrain_generator terrain({ 256, 256 });
+	terrain.generate();*/
+
+	terrgen t({ 512, 512 });
+	t.fill_with_noise({ 31.9, 31.9 });
+	t.show_height();
+
+
+	return 0;
+}
+
+#endif //  TERRAIN

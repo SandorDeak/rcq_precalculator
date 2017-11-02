@@ -75,7 +75,7 @@
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>C:\SFML-2.4.2\include;C:\glm\glm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\libnoise\include;C:\SFML-2.4.2\include;C:\glm\glm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
@@ -97,7 +97,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>C:\SFML-2.4.2\include;C:\glm\glm;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\libnoise\include;C:\SFML-2.4.2\include;C:\glm\glm;</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
@@ -122,12 +122,16 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Perlin_noise.cpp" />
     <ClCompile Include="sky_calculator.cpp" />
     <ClCompile Include="terrain_generator.cpp" />
+    <ClCompile Include="terrgen.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Perlin_noise.h" />
     <ClInclude Include="sky_calculator.h" />
     <ClInclude Include="terrain_generator.h" />
+    <ClInclude Include="terrgen.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

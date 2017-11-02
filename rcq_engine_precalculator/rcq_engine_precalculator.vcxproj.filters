@@ -24,12 +24,24 @@
     <ClCompile Include="terrain_generator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="terrgen.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Perlin_noise.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="sky_calculator.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="terrain_generator.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="terrgen.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Perlin_noise.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
